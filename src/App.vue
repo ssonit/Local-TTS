@@ -30,7 +30,7 @@ function copyShareLink() {
           <div class="text-3xl">🗣️</div>
           <div>
             <h1 class="text-xl font-bold bg-gradient-to-r text-blue-800 dark:text-blue-500">
-              NGHI-TTS
+              LocalSpeech
             </h1>
             <p class="text-sm text-muted-foreground hidden sm:block">Local text-to-speech in your browser</p>
           </div>
