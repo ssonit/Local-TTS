@@ -35,3 +35,7 @@ upload-model-web/*
 .cursor/*
 scraps/*
 .cursorignore
+# Generated TTS audio and source text
+audio_chunks_vi/
+chunks_vi/
+parts_vi/
