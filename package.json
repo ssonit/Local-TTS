@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "workflow": "node start-workflow.mjs",
     "format": "prettier --write piper-tts-web-demo",
     "build": "vite build",
     "lint": "eslint piper-tts-web-demo",

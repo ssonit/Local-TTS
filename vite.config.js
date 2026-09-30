@@ -221,6 +221,14 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  server: {
+    proxy: {
+      "/pipeline": {
+        target: "http://127.0.0.1:8765",
+        changeOrigin: true,
+      },
+    },
+  },
   worker: { format: "es" },
   build: {
     target: "esnext",

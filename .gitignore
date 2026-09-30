@@ -39,3 +39,9 @@ scraps/*
 audio_chunks_vi/
 chunks_vi/
 parts_vi/
+
+# Local YouTube workflow: captions, translations, audio, API keys
+jobs/
+.env
+__pycache__/
+*.pyc

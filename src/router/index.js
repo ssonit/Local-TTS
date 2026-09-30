@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router';
 import VietnameseView from '../views/VietnameseView.vue';
 import LanguageView from '../views/LanguageView.vue';
 import ASRView from '../views/ASRView.vue';
+import WorkflowView from '../views/WorkflowView.vue';
 
 const routes = [
   {
@@ -28,6 +29,11 @@ const routes = [
     path: '/asr',
     name: 'asr',
     component: ASRView,
+  },
+  {
+    path: '/workflow',
+    name: 'workflow',
+    component: WorkflowView,
   },
 ];
 
