@@ -41,7 +41,8 @@ chunks_vi/
 parts_vi/
 
 # Local YouTube workflow: captions, translations, audio, API keys
-jobs/
+jobs/*
+!jobs/transmigrated-into-oregairu-as-a-nobody-cornered_cZ2QY5RSosA/
 .env
 __pycache__/
 *.pyc
