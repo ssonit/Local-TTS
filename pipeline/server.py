@@ -18,6 +18,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .download import fetch_captions, fetch_english_transcript, fetch_meta, probe_language, video_id
+from .sangtacviet import (
+    chapter_meta,
+    chapters_in_range,
+    fetch_chapter,
+    looks_han_viet,
+    natural_mark,
+    naturalize_chapter,
+    parse_book_url,
+    parse_chapter_url,
+)
 from .errors import NoCaptionsError, PipelineError
 from .layout import JOBS, chunk_dir, ensure_job_dir, find_job_dir, translated_transcript
 from .transcribe import run_transcribe
@@ -172,26 +182,53 @@ def _clear_translation(directory: Path) -> None:
     stamp = directory / "vi" / "listen.stamp"
     if stamp.exists():
         stamp.unlink()
+    raw = directory / "vi" / "raw.txt"
+    if raw.exists():
+        raw.unlink()
+    mark = natural_mark(directory)
+    if mark.exists():
+        mark.unlink()
 
 
-def enqueue(url: str, glossary: str | None = None, force: bool = False, mode: str = "auto") -> dict:
-    meta = fetch_meta(url)
+def enqueue(
+    url: str,
+    glossary: str | None = None,
+    force: bool = False,
+    mode: str = "auto",
+    title: str | None = None,
+) -> dict:
+    if mode not in {"auto", "en", "vi", "sangtacviet"}:
+        mode = "auto"
+    if mode == "sangtacviet" or parse_chapter_url(url):
+        if parse_chapter_url(url) is None:
+            raise PipelineError("Chế độ Sangtacviet cần link một chương hoặc trang truyện")
+        meta = chapter_meta(url, title)
+        mode = "sangtacviet"
+    else:
+        meta = fetch_meta(url)
+        meta["source"] = "youtube"
     job_id = meta["id"]
-    directory = ensure_job_dir(job_id, meta.get("title"))
+    title_for_folder = None if meta.get("source") == "sangtacviet" else meta.get("title")
+    directory = ensure_job_dir(job_id, title_for_folder)
+    previous = directory / "meta.json"
+    if meta.get("source") == "sangtacviet" and previous.exists():
+        old = json.loads(previous.read_text(encoding="utf-8"))
+        if old.get("chapterTitle"):
+            meta["title"] = old.get("title") or meta["title"]
+            meta["book"] = old.get("book") or ""
+            meta["chapterTitle"] = old["chapterTitle"]
     (directory / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     if glossary is not None:
         text = glossary.strip()
         (directory / "glossary.txt").write_text((text + "\n") if text else "", encoding="utf-8")
-
-    if mode not in {"auto", "en", "vi"}:
-        mode = "auto"
 
     if (directory / "status.json").exists():
         current = _read_status(job_id)
         if current.get("status") in {"queued", "running"}:
             return _public(job_id, with_text=True)
         saved_mode = current.get("mode") or "auto"
-        if current.get("status") == "done" and not force and saved_mode == mode:
+        needs_natural = _pending_han_viet(directory, current, mode)
+        if current.get("status") == "done" and not force and saved_mode == mode and not needs_natural:
             return _public(job_id, with_text=True)
 
     if force:
@@ -210,9 +247,33 @@ def enqueue(url: str, glossary: str | None = None, force: bool = False, mode: st
         error=None,
         force=force,
         mode=mode,
+        source=meta.get("source") or "youtube",
     )
     _queue.put(job_id)
     return _public(job_id, with_text=True)
+
+
+def enqueue_book(
+    url: str,
+    start: int,
+    end: int,
+    glossary: str | None = None,
+    force: bool = False,
+    mode: str = "sangtacviet",
+) -> dict:
+    chosen = chapters_in_range(url, start, end)
+    first = None
+    for row in chosen:
+        label = row["title"] or f"Chương {row['number']}"
+        job = enqueue(row["url"], glossary=glossary, force=force, mode=mode, title=label)
+        if first is None:
+            first = job
+    if first is None:
+        raise PipelineError("Không xếp được chương nào")
+    first["batch"] = len(chosen)
+    first["batchFrom"] = chosen[0]["number"]
+    first["batchTo"] = chosen[-1]["number"]
+    return first
 
 
 def save_text(job_id: str, text: str, part: int = 1) -> dict:
@@ -235,12 +296,78 @@ def save_text(job_id: str, text: str, part: int = 1) -> dict:
     return _public(job_id, with_text=True, part=chosen)
 
 
+def _remember_raw(directory: Path, text: str, *, force: bool) -> str:
+    raw_path = directory / "vi" / "raw.txt"
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    if force or not raw_path.exists() or raw_path.stat().st_size == 0:
+        payload = text if text.endswith("\n") or text == "" else text + "\n"
+        raw_path.write_text(payload, encoding="utf-8")
+    return raw_path.read_text(encoding="utf-8")
+
+
+def _pending_han_viet(directory: Path, status: dict, mode: str) -> bool:
+    """Job đã xong nhưng lời tiếng Việt vẫn là Hán Việt, cần viết lại."""
+    if natural_mark(directory).exists():
+        return False
+    if mode == "sangtacviet" or status.get("source") == "sangtacviet":
+        return True
+    if status.get("language") != "vi" and mode != "vi":
+        return False
+    raw = directory / "vi" / "raw.txt"
+    path = raw if raw.exists() and raw.stat().st_size > 0 else translated_transcript(directory)
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    return looks_han_viet(path.read_text(encoding="utf-8"))
+
+
+def _finish_vietnamese(job_id: str, directory: Path, source: str, *, force: bool, on_progress, plain: str) -> None:
+    if looks_han_viet(source):
+        _write_status(
+            job_id,
+            step="translate",
+            language="vi",
+            message="Lời tiếng Việt đang là Hán Việt, đang viết lại cho dễ đọc...",
+        )
+        naturalize_chapter(directory, source, force=force, on_progress=on_progress)
+        message = "Xong. Đã chuyển bản Hán Việt sang tiếng Việt đọc được."
+    else:
+        message = plain
+    _write_status(job_id, status="done", step="done", language="vi", message=message, error=None)
+
+
+def _load_youtube_vietnamese(job_id: str, url: str, directory: Path, *, force: bool, on_progress) -> str:
+    raw_path = directory / "vi" / "raw.txt"
+    if not force and raw_path.exists() and raw_path.stat().st_size > 0:
+        return raw_path.read_text(encoding="utf-8")
+    vi_text = directory / "vi" / "transcript.txt"
+    try:
+        text = fetch_captions(
+            url,
+            directory,
+            lang="vi",
+            force=force,
+            on_progress=on_progress,
+            grouped=True,
+        )
+    except NoCaptionsError:
+        _write_status(job_id, step="transcribe", message="Không có phụ đề tiếng Việt. Đang nhận dạng giọng nói.")
+        text, _detected = run_transcribe(
+            url,
+            directory,
+            on_progress=on_progress,
+            language="vi",
+            dest=vi_text,
+            force=force,
+        )
+    return _remember_raw(directory, text, force=True)
+
+
 def _run_job(job_id: str) -> None:
     directory = _job_dir(job_id)
     status = _read_status(job_id)
     force = bool(status.get("force"))
     mode = status.get("mode") or "auto"
-    if mode not in {"auto", "en", "vi"}:
+    if mode not in {"auto", "en", "vi", "sangtacviet"}:
         mode = "auto"
     url = status.get("url") or f"https://youtu.be/{job_id}"
 
@@ -252,6 +379,28 @@ def _run_job(job_id: str) -> None:
             patch["total"] = total
         _write_status(job_id, **patch)
 
+    if status.get("mode") == "sangtacviet" or status.get("source") == "sangtacviet" or parse_chapter_url(url):
+        try:
+            _write_status(job_id, status="running", step="download", language="vi", error=None, force=False)
+            fetch_chapter(url, directory, force=force, on_progress=on_progress)
+            meta_path = directory / "meta.json"
+            title = _read_status(job_id).get("title")
+            if meta_path.exists():
+                saved = json.loads(meta_path.read_text(encoding="utf-8"))
+                title = saved.get("title") or title
+            _write_status(
+                job_id,
+                status="done",
+                step="done",
+                language="vi",
+                title=title,
+                message="Xong. Đã chuyển bản Hán Việt sang tiếng Việt đọc được.",
+                error=None,
+            )
+        except Exception as exc:
+            _write_status(job_id, status="error", error=str(exc), message=str(exc))
+        return
+
     try:
         _write_status(job_id, status="running", step="download", error=None, force=False, message="Đang nhận ngôn ngữ...")
         language = mode
@@ -262,34 +411,21 @@ def _run_job(job_id: str) -> None:
             if language != "vi":
                 language = "en"
         if language == "vi":
-            _write_status(job_id, step="download", language="vi", message="Tiếng Việt, không dịch.")
-            vi_text = directory / "vi" / "transcript.txt"
-            try:
-                fetch_captions(
-                    url,
-                    directory,
-                    lang="vi",
-                    force=force or status.get("language") != "vi",
-                    on_progress=on_progress,
-                    grouped=True,
-                )
-            except NoCaptionsError:
-                _write_status(job_id, step="transcribe", message="Không có phụ đề tiếng Việt. Đang nhận dạng giọng nói.")
-                run_transcribe(
-                    url,
-                    directory,
-                    on_progress=on_progress,
-                    language="vi",
-                    dest=vi_text,
-                    force=force,
-                )
-            _write_status(
+            _write_status(job_id, step="download", language="vi", message="Đang lấy lời tiếng Việt...")
+            source = _load_youtube_vietnamese(
                 job_id,
-                status="done",
-                step="done",
-                language="vi",
-                message="Xong. Video tiếng Việt, không cần dịch.",
-                error=None,
+                url,
+                directory,
+                force=force or status.get("language") != "vi",
+                on_progress=on_progress,
+            )
+            _finish_vietnamese(
+                job_id,
+                directory,
+                source,
+                force=force,
+                on_progress=on_progress,
+                plain="Xong. Video tiếng Việt, không cần dịch.",
             )
             return
 
@@ -305,13 +441,14 @@ def _run_job(job_id: str) -> None:
                 force=force,
             )
             if mode == "auto" and str(detected).startswith("vi"):
-                _write_status(
+                source = _remember_raw(directory, _text, force=force or status.get("language") != "vi")
+                _finish_vietnamese(
                     job_id,
-                    status="done",
-                    step="done",
-                    language="vi",
-                    message="Giọng tiếng Việt, không cần dịch.",
-                    error=None,
+                    directory,
+                    source,
+                    force=force,
+                    on_progress=on_progress,
+                    plain="Giọng tiếng Việt, không cần dịch.",
                 )
                 return
         _write_status(job_id, step="translate", language="en", message="Đang dịch sang tiếng Việt...")
@@ -373,7 +510,7 @@ class Handler(BaseHTTPRequestHandler):
         return data
 
     def _job_id(self, path: str) -> str | None:
-        match = re.fullmatch(r"/pipeline/jobs/([A-Za-z0-9_-]{11})(?:/text)?", path)
+        match = re.fullmatch(r"/pipeline/jobs/([A-Za-z0-9_-]{11,24})(?:/text)?", path)
         if not match:
             return None
         return match.group(1)
@@ -409,13 +546,19 @@ class Handler(BaseHTTPRequestHandler):
             body = self._read_json()
             url = str(body.get("url") or "").strip()
             if not url:
-                raise PipelineError("Thiếu link YouTube")
-            video_id(url)
+                raise PipelineError("Thiếu link")
+            if parse_book_url(url) is None and parse_chapter_url(url) is None:
+                video_id(url)
             glossary = body.get("glossary")
             if glossary is not None:
                 glossary = str(glossary)
             mode = str(body.get("mode") or "auto")
-            job = enqueue(url, glossary=glossary, force=bool(body.get("force")), mode=mode)
+            if parse_book_url(url):
+                start = int(body.get("fromChapter") or 1)
+                end = int(body.get("toChapter") or start)
+                job = enqueue_book(url, start, end, glossary=glossary, force=bool(body.get("force")), mode=mode)
+            else:
+                job = enqueue(url, glossary=glossary, force=bool(body.get("force")), mode=mode)
             self._send(200, job)
         except ValueError as exc:
             self._send(400, {"error": str(exc)})
@@ -426,7 +569,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         path = urlparse(self.path).path.rstrip("/") or "/"
-        match = re.fullmatch(r"/pipeline/jobs/([A-Za-z0-9_-]{11})/text", path)
+        match = re.fullmatch(r"/pipeline/jobs/([A-Za-z0-9_-]{11,24})/text", path)
         if not match:
             self._send(404, {"error": "Không thấy đường dẫn"})
             return

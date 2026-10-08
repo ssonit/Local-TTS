@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { DownloadIcon, PauseIcon, PlayIcon } from 'lucide-vue-next';
 import TextStatistics from '../components/TextStatistics.vue';
 import SpeedControl from '../components/SpeedControl.vue';
@@ -9,6 +9,9 @@ import VoiceSelector from '../components/VoiceSelector.vue';
 import { fetchAvailableModels } from '../utils/model-detector.js';
 import { DEFAULT_MODEL } from '../config.js';
 
+const chapterFrom = ref(1);
+const chapterTo = ref(5);
+const batchNote = ref('');
 const url = ref('');
 const glossary = ref('');
 const mode = ref('auto');
@@ -43,6 +46,17 @@ let pollTimer = null;
 let saveTimer = null;
 
 const running = computed(() => job.value && (job.value.status === 'queued' || job.value.status === 'running'));
+const queueBusy = computed(() =>
+  jobs.value.some((item) => item.status === 'queued' || item.status === 'running')
+);
+const bookLink = computed(() =>
+  /sangtacviet\.(?:com|vip|app)\/truyen\/[^/?#]+\/\d+\/\d+\/?$/i.test(url.value.trim())
+);
+
+watch(url, (value) => {
+  if (/sangtacviet\.(com|vip|app)\/truyen\//i.test(value)) mode.value = 'sangtacviet';
+});
+const novelLink = computed(() => mode.value === 'sangtacviet');
 const percent = computed(() => {
   if (!job.value) return 0;
   if (job.value.status === 'done') return 100;
@@ -84,7 +98,6 @@ function applyJob(next, { replaceText = true } = {}) {
   if (next.part) partIndex.value = next.part;
   partCount.value = Number(next.partCount || 0);
   if (next.status === 'queued' || next.status === 'running') startPoll();
-  else stopPoll();
 }
 
 async function refreshJob(id, part = partIndex.value) {
@@ -96,9 +109,17 @@ async function refreshJob(id, part = partIndex.value) {
 
 function startPoll() {
   if (pollTimer) return;
-  pollTimer = setInterval(() => {
-    if (job.value?.id) refreshJob(job.value.id).catch(() => {});
-    loadJobs();
+  pollTimer = setInterval(async () => {
+    const current = job.value;
+    if (current?.id && (current.status === 'queued' || current.status === 'running')) {
+      await refreshJob(current.id).catch(() => {});
+    }
+    await loadJobs().catch(() => {});
+    const busy =
+      jobs.value.some((item) => item.status === 'queued' || item.status === 'running') ||
+      job.value?.status === 'queued' ||
+      job.value?.status === 'running';
+    if (!busy) stopPoll();
   }, 2000);
 }
 
@@ -122,18 +143,27 @@ async function startJob() {
       formError.value = 'Server trên máy chưa chạy. Dùng npm run workflow.';
       return;
     }
+    const payload = { url: url.value.trim(), glossary: glossary.value, mode: mode.value };
+    if (bookLink.value) {
+      payload.fromChapter = Number(chapterFrom.value) || 1;
+      payload.toChapter = Number(chapterTo.value) || payload.fromChapter;
+    }
     const response = await fetch('/pipeline/jobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: url.value.trim(), glossary: glossary.value, mode: mode.value }),
+      body: JSON.stringify(payload),
     });
     const data = await response.json();
     if (!response.ok) {
       formError.value = data.error || 'Không tạo được job';
       return;
     }
-    url.value = data.url || url.value;
+    if (!bookLink.value) url.value = data.url || url.value;
+    batchNote.value = data.batch > 1
+      ? `Đã xếp ${data.batch} chương (${data.batchFrom}–${data.batchTo}). Chúng chạy lần lượt.`
+      : '';
     applyJob(data);
+    if (data.batch > 1) startPoll();
     await loadJobs();
   } catch {
     serverOk.value = false;
@@ -386,27 +416,51 @@ onUnmounted(() => {
 
     <div class="bg-white/70 dark:bg-gray-900/70 backdrop-blur-xl rounded-2xl shadow-xl border border-white/20 dark:border-gray-700/50 p-6 space-y-4">
       <div>
-        <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Link YouTube</h2>
-        <p class="text-sm text-gray-500 dark:text-gray-400">Tự nhận ngôn ngữ. Tiếng Việt thì giữ nguyên, tiếng Anh thì dịch, rồi tạo audio.</p>
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Link YouTube hoặc truyện Sangtacviet</h2>
+        <p class="text-sm text-gray-500 dark:text-gray-400">
+          YouTube tự nhận ngôn ngữ. Video tiếng Việt mà lời là Hán Việt thì được viết lại cho dễ đọc, giống chương Sangtacviet. Link trang truyện thì chọn khoảng chương, khỏi copy từng chương.
+        </p>
       </div>
       <input
         v-model="url"
         type="url"
-        placeholder="https://youtu.be/..."
+        :placeholder="novelLink ? 'https://sangtacviet.com/truyen/fanqie/1/.../...' : 'https://youtu.be/...'"
         class="w-full p-3 rounded-xl border-2 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800"
       />
       <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-        Ngôn ngữ video
+        Chế độ
         <select
           v-model="mode"
           class="mt-1 w-full p-3 rounded-xl border-2 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 font-normal"
         >
-          <option value="auto">Tự nhận: tiếng Việt thì giữ, tiếng Anh thì dịch</option>
-          <option value="en">Tiếng Anh, dịch sang tiếng Việt</option>
-          <option value="vi">Tiếng Việt, không dịch</option>
+          <option value="auto">YouTube — tự nhận: tiếng Anh thì dịch, tiếng Việt thường thì giữ, Hán Việt thì viết lại</option>
+          <option value="en">YouTube — tiếng Anh, dịch sang tiếng Việt</option>
+          <option value="vi">YouTube — tiếng Việt; nếu lời là Hán Việt thì viết lại cho dễ đọc</option>
+          <option value="sangtacviet">Sangtacviet — lấy một khoảng chương, chuyển Hán Việt sang tiếng Việt tự nhiên</option>
         </select>
       </label>
-      <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+      <div v-if="bookLink" class="grid grid-cols-2 gap-3">
+        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+          Từ chương
+          <input
+            v-model.number="chapterFrom"
+            type="number"
+            min="1"
+            class="mt-1 w-full p-3 rounded-xl border-2 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 font-normal"
+          />
+        </label>
+        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+          Đến chương
+          <input
+            v-model.number="chapterTo"
+            type="number"
+            min="1"
+            class="mt-1 w-full p-3 rounded-xl border-2 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 font-normal"
+          />
+        </label>
+        <p class="col-span-2 text-xs text-gray-500">Tối đa 30 chương mỗi lần. Các chương chạy nối tiếp.</p>
+      </div>
+      <label v-if="!novelLink" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
         Thuật ngữ (tuỳ chọn, mỗi dòng một mục)
         <textarea
           v-model="glossary"
@@ -418,11 +472,12 @@ onUnmounted(() => {
       <button
         type="button"
         class="px-5 py-2.5 rounded-xl font-semibold text-white bg-blue-800 disabled:opacity-50"
-        :disabled="starting || !url.trim() || running"
+        :disabled="starting || !url.trim() || running || queueBusy"
         @click="startJob"
       >
         {{ running ? 'Đang chạy' : starting ? 'Đang gửi' : 'Bắt đầu' }}
       </button>
+      <p v-if="batchNote" class="text-sm text-gray-600 dark:text-gray-300">{{ batchNote }}</p>
       <p v-if="formError" class="text-sm text-red-600 dark:text-red-400">{{ formError }}</p>
 
       <div v-if="job" class="space-y-2">

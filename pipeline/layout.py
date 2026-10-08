@@ -20,7 +20,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 JOBS = REPO / "jobs"
-_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_ID = re.compile(r"^[A-Za-z0-9_-]{11,24}$")
 
 
 def check_video_id(video_id: str) -> str:

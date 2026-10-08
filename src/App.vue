@@ -94,7 +94,7 @@ function copyShareLink() {
             class="px-3 py-2 rounded-lg transition-colors border border-transparent"
             :class="$route.path === '/workflow' ? 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 font-medium border-blue-200 dark:border-blue-800' : 'bg-gray-100/80 dark:bg-gray-800/80 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 border-gray-200 dark:border-gray-700'"
           >
-            Quy trình YouTube
+            Quy trình
           </router-link>
           <router-link
             to="/asr"
