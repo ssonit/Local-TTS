@@ -10,6 +10,7 @@ jobs/<tên>_<video_id>/
   vi/transcript.txt
   vi/chunks/
   vi/parts/
+  vi/progress.json
   asr/
 """
 

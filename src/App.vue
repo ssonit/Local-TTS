@@ -109,7 +109,7 @@ function copyShareLink() {
     </div>
 
     <!-- Main Content -->
-    <main class="container mx-auto px-4 pt-6 pb-4 max-w-4xl">
+    <main class="mx-auto px-4 pt-6 pb-4" :class="$route.path === '/workflow' ? 'max-w-[1440px]' : 'max-w-4xl'">
       <RouterView />
     </main>
 
